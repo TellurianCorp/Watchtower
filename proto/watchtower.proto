@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package watchtower.v1;
+
+option go_package = "github.com/TellurianCorp/watchtower/proto";
+
+import "google/protobuf/timestamp.proto";
+
+// Severity levels aligned with OpenTelemetry and syslog conventions.
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_TRACE       = 1;
+  SEVERITY_DEBUG       = 5;
+  SEVERITY_INFO        = 9;
+  SEVERITY_WARN        = 13;
+  SEVERITY_ERROR       = 17;
+  SEVERITY_FATAL       = 21;
+}
+
+// KeyValue is a lightweight typed attribute to avoid reflection overhead.
+message KeyValue {
+  string key = 1;
+  AnyValue value = 2;
+}
+
+// AnyValue supports common log field types without paying for google.protobuf.Any
+// envelope overhead. This keeps serialization compact and CPU-friendly.
+message AnyValue {
+  oneof value {
+    string  string_value = 1;
+    int64   int_value    = 2;
+    double  double_value = 3;
+    bool    bool_value   = 4;
+    bytes   bytes_value  = 5;
+    ArrayValue array_value = 6;
+    MapValue   map_value   = 7;
+  }
+}
+
+message ArrayValue {
+  repeated AnyValue values = 1;
+}
+
+message MapValue {
+  repeated KeyValue entries = 1;
+}
+
+// LogRecord is the core unit of data flowing through Watchtower.
+// Designed for flexible schemas: mandatory fields are cheap fixed-size types,
+// everything else is carried in the attributes map.
+message LogRecord {
+  // Nanosecond-precision timestamp of when the log was generated.
+  google.protobuf.Timestamp timestamp = 1;
+
+  // Severity of the log entry.
+  Severity severity = 2;
+
+  // Human-readable log message body.
+  string body = 3;
+
+  // Structured attributes — the flexible schema extension point.
+  // Applications attach any domain-specific fields here.
+  repeated KeyValue attributes = 4;
+
+  // Resource identity: which service/host/instance produced this log.
+  Resource resource = 5;
+
+  // Optional trace correlation for distributed tracing integration.
+  bytes trace_id = 6;
+  bytes span_id  = 7;
+
+  // Schema URL that describes the attribute layout for this record.
+  // Allows downstream consumers to interpret the flexible schema.
+  string schema_url = 8;
+}
+
+// Resource describes the entity producing logs.
+message Resource {
+  string service_name = 1;
+  string host_name    = 2;
+  string instance_id  = 3;
+  repeated KeyValue attributes = 4;
+}
+
+// LogBatch groups multiple records for network-efficient transmission.
+// The collector and forwarder always operate on batches.
+message LogBatch {
+  repeated LogRecord records = 1;
+
+  // Optional batch-level metadata (e.g., compression hint, schema version).
+  map<string, string> metadata = 2;
+}
+
+// IngestResponse acknowledges a batch.
+message IngestResponse {
+  // Number of records accepted.
+  int64 accepted_count = 1;
+
+  // If non-empty, partial failure details keyed by record index.
+  map<int64, string> errors = 2;
+}
+
+// WatchtowerService is the gRPC API exposed by every Watchtower instance.
+service WatchtowerService {
+  // Ingest receives a batch of log records (unary RPC — simple, retryable).
+  rpc Ingest(LogBatch) returns (IngestResponse);
+
+  // IngestStream allows high-throughput streaming from long-lived connections.
+  // The client streams batches; the server acks periodically.
+  rpc IngestStream(stream LogBatch) returns (stream IngestResponse);
+}
