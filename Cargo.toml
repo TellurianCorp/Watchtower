@@ -1,0 +1,54 @@
+[package]
+name = "watchtower"
+version = "0.1.0"
+edition = "2024"
+description = "High-performance gRPC log collection sidecar for Tellurian Corp"
+license = "MIT"
+
+[dependencies]
+# gRPC + Protobuf
+tonic = { version = "0.13", features = ["tls-ring", "gzip", "channel", "transport"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for Elasticsearch/OpenSearch bulk API
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# TLS
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+
+# Logging for the agent itself
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async trait + error handling
+async-trait = "0.1"
+thiserror = "2"
+
+# Hex encoding for trace/span IDs
+hex = "0.4"
+
+# Stream utilities for gRPC streaming
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

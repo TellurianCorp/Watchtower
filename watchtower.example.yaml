@@ -1,0 +1,61 @@
+# Watchtower — Example Configuration
+#
+# Copy this to watchtower.yaml and adjust for your environment.
+# The agent-side config has many knobs; the app-side config is intentionally
+# minimal (just a certificate + server address).
+
+server:
+  listen_addr: "[::]:9090"
+  max_recv_msg_size: 4194304   # 4 MB
+  max_concurrent_streams: 100
+  keepalive_interval: "30s"
+  keepalive_timeout: "10s"
+  enable_compression: true
+
+  # TLS (optional). When set, clients must present a valid certificate.
+  # The certificate also identifies the service/app sending logs.
+  # tls_cert: "/etc/watchtower/server.crt"
+  # tls_key: "/etc/watchtower/server.key"
+  # tls_ca: "/etc/watchtower/ca.crt"
+
+pipeline:
+  batch_size: 1024             # Records per batch sent to sinks
+  flush_interval: "2s"         # Max time before flushing a partial batch
+  buffer_size: 8192            # Bounded channel capacity (backpressure)
+  workers: 2                   # Concurrent sink-delivery tasks
+
+sinks:
+  # --- Forward to a larger Watchtower aggregation instance ---
+  - type: watchtower
+    target: "watchtower-aggregator.internal:9090"
+    enable_compression: true
+    timeout: "10s"
+    retry_attempts: 3
+    retry_backoff: "1s"
+
+  # --- Deliver directly to Elasticsearch ---
+  # - type: elasticsearch
+  #   addresses:
+  #     - "https://es-node-1:9200"
+  #     - "https://es-node-2:9200"
+  #   index: "watchtower-logs"
+  #   username: "elastic"
+  #   password: "changeme"
+  #   tls: true
+  #   batch_size: 512
+  #   flush_interval: "5s"
+  #   retry_attempts: 3
+  #   retry_backoff: "1s"
+
+  # --- Deliver directly to OpenSearch ---
+  # - type: opensearch
+  #   addresses:
+  #     - "https://opensearch-node-1:9200"
+  #   index: "watchtower-logs"
+  #   username: "admin"
+  #   password: "admin"
+  #   tls: true
+  #   batch_size: 512
+  #   flush_interval: "5s"
+  #   retry_attempts: 3
+  #   retry_backoff: "1s"
