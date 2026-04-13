@@ -9,6 +9,8 @@ use serde::Deserialize;
 pub struct Config {
     pub server: ServerConfig,
     pub pipeline: PipelineConfig,
+    pub health: HealthConfig,
+    pub spillover: SpilloverConfig,
     #[serde(default)]
     pub sinks: Vec<SinkConfig>,
 }
@@ -42,6 +44,22 @@ pub struct PipelineConfig {
     pub flush_interval: Duration,
     pub buffer_size: usize,
     pub workers: usize,
+}
+
+/// Health/metrics HTTP server settings.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct HealthConfig {
+    pub enabled: bool,
+    pub listen_addr: String,
+}
+
+/// Disk spillover settings for crash resilience.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SpilloverConfig {
+    pub enabled: bool,
+    pub path: String,
 }
 
 /// Downstream delivery target.
@@ -99,7 +117,27 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             pipeline: PipelineConfig::default(),
+            health: HealthConfig::default(),
+            spillover: SpilloverConfig::default(),
             sinks: Vec::new(),
+        }
+    }
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_addr: "[::]:9091".into(),
+        }
+    }
+}
+
+impl Default for SpilloverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "/var/lib/watchtower/spillover.bin".into(),
         }
     }
 }

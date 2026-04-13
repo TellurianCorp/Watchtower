@@ -1,8 +1,6 @@
 # Watchtower — Example Configuration
 #
 # Copy this to watchtower.yaml and adjust for your environment.
-# The agent-side config has many knobs; the app-side config is intentionally
-# minimal (just a certificate + server address).
 
 server:
   listen_addr: "[::]:9090"
@@ -12,8 +10,8 @@ server:
   keepalive_timeout: "10s"
   enable_compression: true
 
-  # TLS (optional). When set, clients must present a valid certificate.
-  # The certificate also identifies the service/app sending logs.
+  # TLS (optional). Uncomment to enable.
+  # When tls_ca is also set, the server requires mTLS (client cert verification).
   # tls_cert: "/etc/watchtower/server.crt"
   # tls_key: "/etc/watchtower/server.key"
   # tls_ca: "/etc/watchtower/ca.crt"
@@ -23,6 +21,19 @@ pipeline:
   flush_interval: "2s"         # Max time before flushing a partial batch
   buffer_size: 8192            # Bounded channel capacity (backpressure)
   workers: 2                   # Concurrent sink-delivery tasks
+
+# Health check + Prometheus metrics HTTP server.
+# Exposes /healthz, /readyz, and /metrics.
+health:
+  enabled: true
+  listen_addr: "[::]:9091"
+
+# Disk-backed spillover buffer. When the in-memory pipeline is full,
+# batches are written here instead of being dropped. They are replayed
+# on next startup or when capacity frees up.
+spillover:
+  enabled: false
+  path: "/var/lib/watchtower/spillover.bin"
 
 sinks:
   # --- Forward to a larger Watchtower aggregation instance ---

@@ -3,16 +3,19 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::signal;
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::{error, info};
 
 use watchtower::config::{Config, SinkConfig};
+use watchtower::health::HealthServer;
+use watchtower::metrics::Metrics;
 use watchtower::pipeline::Pipeline;
 use watchtower::proto::watchtower_service_server::WatchtowerServiceServer;
 use watchtower::server::WatchtowerServer;
 use watchtower::sink::elastic::ElasticSink;
 use watchtower::sink::forward::ForwardSink;
 use watchtower::sink::Sink;
+use watchtower::spillover::SpilloverBuffer;
 
 #[derive(Parser)]
 #[command(name = "watchtower", about = "High-performance gRPC log collection sidecar")]
@@ -44,20 +47,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "starting watchtower"
     );
 
-    // Build sinks.
+    // --- Metrics ---
+    let metrics = Metrics::new();
+
+    // --- Shutdown coordination ---
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // --- Health/Metrics HTTP server ---
+    let ready_handle = if cfg.health.enabled {
+        let health_addr: SocketAddr = cfg.health.listen_addr.parse()?;
+        let (health_server, ready_handle) = HealthServer::new(metrics.clone());
+        let health_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            health_server.serve(health_addr, health_shutdown_rx).await;
+        });
+        Some(ready_handle)
+    } else {
+        None
+    };
+
+    // --- Spillover buffer ---
+    let spillover = if cfg.spillover.enabled {
+        match SpilloverBuffer::new(&cfg.spillover.path) {
+            Ok(buf) => {
+                info!(path = cfg.spillover.path.as_str(), "spillover buffer enabled");
+                Some(Arc::new(buf))
+            }
+            Err(e) => {
+                error!(error = %e, "failed to open spillover buffer, continuing without");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // --- Build sinks ---
     let sinks = build_sinks(&cfg.sinks)?;
 
-    // Build pipeline.
+    // --- Build pipeline ---
     let pipeline = Arc::new(Pipeline::new(
         cfg.pipeline.buffer_size,
         cfg.pipeline.workers,
         cfg.pipeline.batch_size,
         cfg.pipeline.flush_interval,
         sinks,
+        metrics.clone(),
+        spillover.clone(),
     ));
 
-    // Build gRPC server.
-    let grpc_server = WatchtowerServer::new(Arc::clone(&pipeline));
+    // --- Replay any pending spillover records ---
+    if let Some(ref spill) = spillover {
+        if spill.has_pending() {
+            info!("replaying spilled records from disk...");
+            let pipeline_ref = Arc::clone(&pipeline);
+            let spill_ref = Arc::clone(spill);
+            tokio::task::spawn_blocking(move || {
+                let _ = spill_ref.replay(|batch| pipeline_ref.submit(batch));
+            })
+            .await?;
+        }
+    }
+
+    // --- Build gRPC server ---
+    let grpc_server = WatchtowerServer::new(Arc::clone(&pipeline), metrics.clone());
 
     let addr: SocketAddr = cfg.server.listen_addr.parse()?;
 
@@ -66,13 +119,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
         .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
-    let router = Server::builder()
+    let mut server_builder = Server::builder();
+
+    // --- TLS / mTLS ---
+    if let (Some(cert_path), Some(key_path)) = (&cfg.server.tls_cert, &cfg.server.tls_key) {
+        let cert = tokio::fs::read(cert_path).await?;
+        let key = tokio::fs::read(key_path).await?;
+        let identity = Identity::from_pem(cert, key);
+
+        let mut tls_config = ServerTlsConfig::new().identity(identity);
+
+        if let Some(ca_path) = &cfg.server.tls_ca {
+            let ca = tokio::fs::read(ca_path).await?;
+            let ca_cert = tonic::transport::Certificate::from_pem(ca);
+            tls_config = tls_config.client_ca_root(ca_cert);
+            info!("mTLS enabled (client certificate verification)");
+        } else {
+            info!("TLS enabled (server-side only)");
+        }
+
+        server_builder = server_builder.tls_config(tls_config)?;
+    }
+
+    let router = server_builder
         .max_concurrent_streams(cfg.server.max_concurrent_streams)
         .add_service(svc);
 
+    // Mark ready once the server is about to accept connections.
+    if let Some(ref rh) = ready_handle {
+        rh.set_ready();
+    }
+
     info!(%addr, "gRPC server listening");
 
-    // Run server with graceful shutdown on SIGINT/SIGTERM.
+    // --- Run server with graceful shutdown ---
     let shutdown_pipeline = pipeline;
     router
         .serve_with_shutdown(addr, async {
@@ -80,6 +160,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("shutdown signal received");
         })
         .await?;
+
+    // Signal health server to stop.
+    let _ = shutdown_tx.send(true);
+
+    if let Some(ref rh) = ready_handle {
+        rh.set_not_ready();
+    }
 
     // Drain pipeline after server stops accepting.
     info!("draining pipeline...");

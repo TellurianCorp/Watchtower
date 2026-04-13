@@ -43,6 +43,17 @@ hex = "0.4"
 # Stream utilities for gRPC streaming
 tokio-stream = "0.1"
 
+# Metrics (Prometheus)
+prometheus = "0.14"
+
+# Health check HTTP server
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Disk spillover
+crc32fast = "1"
+
 [build-dependencies]
 tonic-build = "0.13"
 

@@ -4,6 +4,7 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error};
 
+use crate::metrics::Metrics;
 use crate::pipeline::Pipeline;
 use crate::proto::watchtower_service_server::WatchtowerService;
 use crate::proto::{IngestResponse, LogBatch};
@@ -11,11 +12,12 @@ use crate::proto::{IngestResponse, LogBatch};
 /// WatchtowerServer implements the gRPC WatchtowerService.
 pub struct WatchtowerServer {
     pipeline: Arc<Pipeline>,
+    metrics: Metrics,
 }
 
 impl WatchtowerServer {
-    pub fn new(pipeline: Arc<Pipeline>) -> Self {
-        Self { pipeline }
+    pub fn new(pipeline: Arc<Pipeline>, metrics: Metrics) -> Self {
+        Self { pipeline, metrics }
     }
 }
 
@@ -36,6 +38,9 @@ impl WatchtowerService for WatchtowerServer {
             }));
         }
 
+        self.metrics.batches_received.inc();
+        self.metrics.records_received.inc_by(count as u64);
+
         if self.pipeline.submit(batch) {
             debug!(records = count, "ingested batch");
             Ok(Response::new(IngestResponse {
@@ -43,6 +48,7 @@ impl WatchtowerService for WatchtowerServer {
                 errors: Default::default(),
             }))
         } else {
+            self.metrics.records_dropped.inc_by(count as u64);
             Err(Status::resource_exhausted("pipeline buffer full"))
         }
     }
@@ -58,6 +64,9 @@ impl WatchtowerService for WatchtowerServer {
     ) -> Result<Response<Self::IngestStreamStream>, Status> {
         let mut stream = request.into_inner();
         let pipeline = Arc::clone(&self.pipeline);
+        let metrics = self.metrics.clone();
+
+        metrics.active_streams.inc();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
@@ -66,6 +75,9 @@ impl WatchtowerService for WatchtowerServer {
                 match result {
                     Ok(batch) => {
                         let count = batch.records.len() as i64;
+                        metrics.batches_received.inc();
+                        metrics.records_received.inc_by(count as u64);
+
                         let resp = if pipeline.submit(batch) {
                             debug!(records = count, "stream: ingested batch");
                             Ok(IngestResponse {
@@ -73,6 +85,7 @@ impl WatchtowerService for WatchtowerServer {
                                 errors: Default::default(),
                             })
                         } else {
+                            metrics.records_dropped.inc_by(count as u64);
                             Err(Status::resource_exhausted("pipeline buffer full"))
                         };
 
@@ -82,10 +95,12 @@ impl WatchtowerService for WatchtowerServer {
                     }
                     Err(e) => {
                         error!(error = %e, "stream receive error");
+                        metrics.grpc_errors.inc();
                         break;
                     }
                 }
             }
+            metrics.active_streams.dec();
         });
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
