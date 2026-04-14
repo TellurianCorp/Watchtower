@@ -1,3 +1,4 @@
+use std::env;
 use std::path::Path;
 use std::time::Duration;
 
@@ -232,12 +233,166 @@ mod humantime_serde {
 }
 
 impl Config {
-    /// Load configuration from a YAML file, merging onto defaults.
+    /// Load configuration from a YAML file, then apply PORT env var override.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let data = std::fs::read_to_string(path.as_ref())?;
-        let cfg: Config = serde_yaml::from_str(&data)?;
+        let mut cfg: Config = serde_yaml::from_str(&data)?;
+        cfg.apply_env_overrides();
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Build a complete configuration purely from environment variables.
+    /// Used when no config file is available (e.g., Railway deployments).
+    pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut cfg = Config::default();
+
+        // --- Server ---
+        if let Ok(port) = env::var("PORT") {
+            cfg.server.listen_addr = format!("[::]:{port}");
+        }
+
+        // --- Health ---
+        if let Ok(port) = env::var("WATCHTOWER_HEALTH_PORT") {
+            cfg.health.listen_addr = format!("[::]:{port}");
+        }
+        if let Ok(v) = env::var("WATCHTOWER_HEALTH_ENABLED") {
+            cfg.health.enabled = v != "0" && v.to_lowercase() != "false";
+        }
+
+        // --- Pipeline ---
+        if let Ok(v) = env::var("WATCHTOWER_WORKERS") {
+            cfg.pipeline.workers = v.parse().map_err(|_| "invalid WATCHTOWER_WORKERS")?;
+        }
+        if let Ok(v) = env::var("WATCHTOWER_BATCH_SIZE") {
+            cfg.pipeline.batch_size = v.parse().map_err(|_| "invalid WATCHTOWER_BATCH_SIZE")?;
+        }
+        if let Ok(v) = env::var("WATCHTOWER_BUFFER_SIZE") {
+            cfg.pipeline.buffer_size = v.parse().map_err(|_| "invalid WATCHTOWER_BUFFER_SIZE")?;
+        }
+        if let Ok(v) = env::var("WATCHTOWER_FLUSH_INTERVAL") {
+            cfg.pipeline.flush_interval = parse_duration_str(&v)?;
+        }
+
+        // --- Spillover ---
+        if let Ok(v) = env::var("WATCHTOWER_SPILLOVER_ENABLED") {
+            cfg.spillover.enabled = v != "0" && v.to_lowercase() != "false";
+        }
+        if let Ok(v) = env::var("WATCHTOWER_SPILLOVER_PATH") {
+            cfg.spillover.path = v;
+        }
+
+        // --- Sinks (env vars) ---
+        cfg.sinks = Self::sinks_from_env();
+
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Apply environment variable overrides on top of a YAML-loaded config.
+    /// This ensures `PORT` always wins (Railway injects it).
+    fn apply_env_overrides(&mut self) {
+        if let Ok(port) = env::var("PORT") {
+            self.server.listen_addr = format!("[::]:{port}");
+        }
+        if let Ok(port) = env::var("WATCHTOWER_HEALTH_PORT") {
+            self.health.listen_addr = format!("[::]:{port}");
+        }
+    }
+
+    /// Parse sink configuration from environment variables.
+    /// Supports a single-sink shorthand (WATCHTOWER_SINK_*) and
+    /// multi-sink indexed form (WATCHTOWER_SINK_0_*, WATCHTOWER_SINK_1_*, ...).
+    fn sinks_from_env() -> Vec<SinkConfig> {
+        let mut sinks = Vec::new();
+
+        // Try single-sink shorthand first.
+        if let Some(sink) = Self::parse_sink_env("WATCHTOWER_SINK") {
+            sinks.push(sink);
+        }
+
+        // Then try indexed sinks: WATCHTOWER_SINK_0, WATCHTOWER_SINK_1, ...
+        for i in 0..16 {
+            let prefix = format!("WATCHTOWER_SINK_{i}");
+            if let Some(sink) = Self::parse_sink_env(&prefix) {
+                sinks.push(sink);
+            }
+        }
+
+        sinks
+    }
+
+    fn parse_sink_env(prefix: &str) -> Option<SinkConfig> {
+        let sink_type = env::var(format!("{prefix}_TYPE")).ok()?;
+
+        match sink_type.to_lowercase().as_str() {
+            "elasticsearch" | "opensearch" => {
+                let addresses_raw = env::var(format!("{prefix}_ADDRESSES")).unwrap_or_default();
+                let addresses: Vec<String> = addresses_raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                if addresses.is_empty() {
+                    return None;
+                }
+
+                let es_cfg = ElasticSinkConfig {
+                    addresses,
+                    index: env::var(format!("{prefix}_INDEX")).unwrap_or_else(|_| default_index()),
+                    username: env::var(format!("{prefix}_USERNAME")).ok(),
+                    password: env::var(format!("{prefix}_PASSWORD")).ok(),
+                    tls: env::var(format!("{prefix}_TLS"))
+                        .map(|v| v != "0" && v.to_lowercase() != "false")
+                        .unwrap_or(false),
+                    batch_size: env::var(format!("{prefix}_BATCH_SIZE"))
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_sink_batch_size),
+                    flush_interval: env::var(format!("{prefix}_FLUSH_INTERVAL"))
+                        .ok()
+                        .and_then(|v| parse_duration_str(&v).ok())
+                        .unwrap_or_else(default_flush_interval),
+                    retry_attempts: env::var(format!("{prefix}_RETRY_ATTEMPTS"))
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_retry_attempts),
+                    retry_backoff: default_retry_backoff(),
+                };
+
+                if sink_type.to_lowercase() == "opensearch" {
+                    Some(SinkConfig::OpenSearch(es_cfg))
+                } else {
+                    Some(SinkConfig::Elasticsearch(es_cfg))
+                }
+            }
+            "watchtower" => {
+                let target = env::var(format!("{prefix}_TARGET")).ok()?;
+                if target.is_empty() {
+                    return None;
+                }
+
+                Some(SinkConfig::Watchtower(ForwardSinkConfig {
+                    target,
+                    enable_compression: env::var(format!("{prefix}_COMPRESSION"))
+                        .map(|v| v != "0" && v.to_lowercase() != "false")
+                        .unwrap_or(true),
+                    timeout: env::var(format!("{prefix}_TIMEOUT"))
+                        .ok()
+                        .and_then(|v| parse_duration_str(&v).ok())
+                        .unwrap_or_else(default_forward_timeout),
+                    tls_cert: env::var(format!("{prefix}_TLS_CERT")).ok(),
+                    tls_ca: env::var(format!("{prefix}_TLS_CA")).ok(),
+                    retry_attempts: env::var(format!("{prefix}_RETRY_ATTEMPTS"))
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_retry_attempts),
+                    retry_backoff: default_retry_backoff(),
+                }))
+            }
+            _ => None,
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -265,5 +420,19 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+/// Parse a duration string like "5s", "100ms", "2m" outside of serde context.
+fn parse_duration_str(s: &str) -> Result<Duration, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_suffix("ms") {
+        Ok(Duration::from_millis(rest.trim().parse()?))
+    } else if let Some(rest) = s.strip_suffix('s') {
+        Ok(Duration::from_secs(rest.trim().parse()?))
+    } else if let Some(rest) = s.strip_suffix('m') {
+        Ok(Duration::from_secs(rest.trim().parse::<u64>()? * 60))
+    } else {
+        Ok(Duration::from_secs(s.parse()?))
     }
 }

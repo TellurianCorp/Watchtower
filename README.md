@@ -58,6 +58,8 @@ network overhead.
   helpers and typed attribute builders
 - **Optimized for sidecar deployment** — release binary is ~4 MB (LTO, stripped,
   single codegen unit), no GC, predictable latency
+- **Railway / container-ready** — configure entirely via environment variables,
+  auto-detects `PORT`, no config file needed
 
 ## Quick Start
 
@@ -91,6 +93,15 @@ sinks:
 ```
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
+
+**Or configure entirely via environment variables** (no YAML file needed):
+
+```bash
+export PORT=9090
+export WATCHTOWER_SINK_TYPE=elasticsearch
+export WATCHTOWER_SINK_ADDRESSES=http://localhost:9200
+./target/release/watchtower
+```
 
 ### 3. Run
 
@@ -141,6 +152,22 @@ async fn main() {
 
 See [docs/client-sdk.md](docs/client-sdk.md) for the full SDK guide.
 
+## Deploy on Railway
+
+1. Push this repo to GitHub
+2. Create a new Railway project and connect the repo
+3. Set environment variables in the Railway dashboard:
+   ```
+   WATCHTOWER_SINK_TYPE=elasticsearch
+   WATCHTOWER_SINK_ADDRESSES=https://your-es:9200
+   WATCHTOWER_SINK_USERNAME=elastic
+   WATCHTOWER_SINK_PASSWORD=changeme
+   WATCHTOWER_SINK_TLS=true
+   ```
+4. Deploy — Railway injects `PORT` automatically, no config file needed
+
+See [docs/railway.md](docs/railway.md) for the full Railway deployment guide.
+
 ## Endpoints
 
 | Endpoint | Port | Description |
@@ -160,7 +187,7 @@ See [docs/client-sdk.md](docs/client-sdk.md) for the full SDK guide.
 ├── src/
 │   ├── main.rs                 # CLI entrypoint, TLS setup, signal handling
 │   ├── lib.rs                  # Module exports
-│   ├── config/mod.rs           # YAML configuration with defaults
+│   ├── config/mod.rs           # YAML + env var configuration
 │   ├── server/mod.rs           # gRPC WatchtowerService implementation
 │   ├── pipeline/mod.rs         # Bounded channel + worker fan-out
 │   ├── sink/
@@ -176,9 +203,12 @@ See [docs/client-sdk.md](docs/client-sdk.md) for the full SDK guide.
 ├── docs/
 │   ├── configuration.md        # Full configuration reference
 │   ├── client-sdk.md           # Client SDK usage guide
-│   └── deployment.md           # Docker and Kubernetes deployment
+│   ├── deployment.md           # Docker and Kubernetes deployment
+│   └── railway.md              # Railway deployment guide
 ├── Cargo.toml
 ├── build.rs                    # Protobuf code generation
+├── Dockerfile                  # Multi-stage container build
+├── railway.toml                # Railway platform configuration
 ├── Makefile
 └── watchtower.example.yaml     # Example configuration
 ```

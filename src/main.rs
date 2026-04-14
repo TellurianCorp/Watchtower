@@ -4,7 +4,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::signal;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use watchtower::config::{Config, SinkConfig};
 use watchtower::health::HealthServer;
@@ -38,7 +38,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = Config::load(&cli.config)?;
+
+    // Load config: try YAML file first, fall back to env vars (for Railway/containers).
+    let cfg = if std::path::Path::new(&cli.config).exists() {
+        info!(path = cli.config.as_str(), "loading config from file");
+        Config::load(&cli.config)?
+    } else {
+        warn!(
+            path = cli.config.as_str(),
+            "config file not found, configuring from environment variables"
+        );
+        Config::from_env()?
+    };
 
     info!(
         listen_addr = cfg.server.listen_addr.as_str(),
