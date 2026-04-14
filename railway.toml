@@ -2,7 +2,8 @@
 builder = "dockerfile"
 
 [deploy]
-healthcheckPath = "/healthz"
-healthcheckTimeout = 5
+# TCP health check — Railway verifies the gRPC port is accepting connections.
+# HTTP health endpoints (/healthz, /readyz, /metrics) are available on the
+# separate health port (default 9091) for Kubernetes and internal monitoring.
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5

@@ -53,7 +53,7 @@ Click **Deploy**. Railway will:
 1. Build the Rust binary via the multi-stage Dockerfile
 2. Start the container
 3. Inject the `PORT` environment variable (Watchtower listens on it automatically)
-4. Run health checks against `/healthz`
+4. TCP health check confirms the gRPC port is accepting connections
 
 Your Watchtower instance is now receiving logs on the Railway-assigned port.
 
@@ -198,9 +198,13 @@ default 9091).
 
 ### Health checks
 
-The `railway.toml` configures Railway to hit `/healthz` for liveness checks.
-The health server listens on port 9091 by default. Railway's health check
-system accesses it internally.
+Railway uses a TCP health check against the gRPC port (the `PORT` it injects).
+This works because tonic accepts TCP connections immediately on startup.
+
+The HTTP health endpoints (`/healthz`, `/readyz`, `/metrics`) run on a separate
+port (default 9091, configurable via `WATCHTOWER_HEALTH_PORT`). These are
+designed for Kubernetes probes and Prometheus scraping, not Railway's built-in
+health check.
 
 ### Private networking
 
