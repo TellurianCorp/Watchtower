@@ -323,11 +323,52 @@ impl Config {
             cfg.spillover.path = v;
         }
 
+        // --- Viewer (built-in SQLite log viewer) ---
+        Self::apply_viewer_env(&mut cfg.viewer, |k| env::var(k).ok())?;
+
         // --- Sinks (env vars) ---
         cfg.sinks = Self::sinks_from_env();
 
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Apply `WATCHTOWER_VIEWER_*` environment variables onto a ViewerConfig.
+    /// `get` resolves a variable by name (None if unset); it is injected so the
+    /// parsing is unit-testable without mutating the process environment.
+    fn apply_viewer_env<F>(viewer: &mut ViewerConfig, get: F) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(v) = get("WATCHTOWER_VIEWER_ENABLED") {
+            viewer.enabled = v != "0" && v.to_lowercase() != "false";
+        }
+        // PORT binds all interfaces (needed behind Railway's proxy); LISTEN_ADDR overrides.
+        if let Some(port) = get("WATCHTOWER_VIEWER_PORT") {
+            viewer.listen_addr = format!("[::]:{port}");
+        }
+        if let Some(addr) = get("WATCHTOWER_VIEWER_LISTEN_ADDR") {
+            viewer.listen_addr = addr;
+        }
+        if let Some(v) = get("WATCHTOWER_VIEWER_DB_PATH") {
+            viewer.db_path = v;
+        }
+        if let Some(v) = get("WATCHTOWER_VIEWER_MAX_RECORDS") {
+            viewer.retention.max_records =
+                v.parse().map_err(|_| "invalid WATCHTOWER_VIEWER_MAX_RECORDS")?;
+        }
+        if let Some(v) = get("WATCHTOWER_VIEWER_MAX_AGE") {
+            viewer.retention.max_age =
+                parse_duration(&v).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+        // Basic auth only when BOTH username and password are present.
+        if let (Some(username), Some(password)) = (
+            get("WATCHTOWER_VIEWER_AUTH_USERNAME"),
+            get("WATCHTOWER_VIEWER_AUTH_PASSWORD"),
+        ) {
+            viewer.auth = Some(BasicAuthConfig { username, password });
+        }
+        Ok(())
     }
 
     /// Apply environment variable overrides on top of a YAML-loaded config.
@@ -516,5 +557,48 @@ mod tests {
         let mut cfg = Config::default();
         cfg.viewer.enabled = true;
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn viewer_env_vars_parse() {
+        let env = std::collections::HashMap::from([
+            ("WATCHTOWER_VIEWER_ENABLED", "true"),
+            ("WATCHTOWER_VIEWER_PORT", "9092"),
+            ("WATCHTOWER_VIEWER_DB_PATH", "/data/logs.db"),
+            ("WATCHTOWER_VIEWER_MAX_RECORDS", "500000"),
+            ("WATCHTOWER_VIEWER_MAX_AGE", "3d"),
+            ("WATCHTOWER_VIEWER_AUTH_USERNAME", "admin"),
+            ("WATCHTOWER_VIEWER_AUTH_PASSWORD", "secret"),
+        ]);
+        let mut v = ViewerConfig::default();
+        Config::apply_viewer_env(&mut v, |k| env.get(k).map(|s| s.to_string())).unwrap();
+        assert!(v.enabled);
+        assert_eq!(v.listen_addr, "[::]:9092"); // PORT binds all interfaces (Railway)
+        assert_eq!(v.db_path, "/data/logs.db");
+        assert_eq!(v.retention.max_records, 500_000);
+        assert_eq!(v.retention.max_age, Duration::from_secs(3 * 86400)); // "3d" needs h/d parser
+        let auth = v.auth.expect("auth should be set when both user+pass present");
+        assert_eq!(auth.username, "admin");
+        assert_eq!(auth.password, "secret");
+    }
+
+    #[test]
+    fn viewer_env_listen_addr_overrides_port() {
+        let env = std::collections::HashMap::from([
+            ("WATCHTOWER_VIEWER_PORT", "9092"),
+            ("WATCHTOWER_VIEWER_LISTEN_ADDR", "127.0.0.1:7000"),
+        ]);
+        let mut v = ViewerConfig::default();
+        Config::apply_viewer_env(&mut v, |k| env.get(k).map(|s| s.to_string())).unwrap();
+        assert_eq!(v.listen_addr, "127.0.0.1:7000");
+    }
+
+    #[test]
+    fn viewer_env_partial_auth_is_ignored() {
+        let env = std::collections::HashMap::from([("WATCHTOWER_VIEWER_AUTH_USERNAME", "admin")]);
+        let mut v = ViewerConfig::default();
+        Config::apply_viewer_env(&mut v, |k| env.get(k).map(|s| s.to_string())).unwrap();
+        assert!(!v.enabled);
+        assert!(v.auth.is_none()); // password missing -> no auth
     }
 }

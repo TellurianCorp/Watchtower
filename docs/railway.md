@@ -103,6 +103,28 @@ Or from any gRPC client using the public URL that Railway provides.
 | `WATCHTOWER_SPILLOVER_ENABLED` | `false` | Enable disk spillover |
 | `WATCHTOWER_SPILLOVER_PATH` | `/var/lib/watchtower/spillover.bin` | Spillover file path |
 
+### Built-in viewer
+
+Enable the embedded SQLite log viewer (web UI + JSON API) so you can browse logs
+in a browser without Elasticsearch. When enabled, it runs as an additional sink
+alongside any others. Expose `WATCHTOWER_VIEWER_PORT` via a separate Railway
+domain to reach the UI, and set basic auth before exposing it publicly.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WATCHTOWER_VIEWER_ENABLED` | `false` | Enable the built-in viewer |
+| `WATCHTOWER_VIEWER_PORT` | `9092` | Viewer HTTP port; binds `[::]:PORT` (reachable behind the Railway proxy) |
+| `WATCHTOWER_VIEWER_LISTEN_ADDR` | _(unset)_ | Full bind address; overrides `WATCHTOWER_VIEWER_PORT` |
+| `WATCHTOWER_VIEWER_DB_PATH` | `:memory:` | `:memory:` (live logs since last restart) or a file path (durable — put it on a Railway volume) |
+| `WATCHTOWER_VIEWER_MAX_RECORDS` | `1000000` | Retention: trim oldest rows beyond this |
+| `WATCHTOWER_VIEWER_MAX_AGE` | `7d` | Retention: delete rows older than this (`30m`, `12h`, `7d`) |
+| `WATCHTOWER_VIEWER_AUTH_USERNAME` | _(unset)_ | HTTP basic auth username (set with password to require auth) |
+| `WATCHTOWER_VIEWER_AUTH_PASSWORD` | _(unset)_ | HTTP basic auth password |
+
+> The viewer is **off** by default. With `:memory:`, logs are lost on every
+> redeploy/restart — attach a Railway volume and point `WATCHTOWER_VIEWER_DB_PATH`
+> at it for durability.
+
 ### Sink (single)
 
 Use the `WATCHTOWER_SINK_*` prefix for a single sink:
