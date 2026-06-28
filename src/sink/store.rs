@@ -195,6 +195,25 @@ impl LogStore {
         }
         Ok(out)
     }
+
+    pub fn prune(&self, max_age_nanos: i64, max_records: u64, now_nanos: i64) -> Result<u64, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Lock)?;
+        let mut deleted = 0u64;
+
+        // 1) Age-based: drop rows older than the cutoff. Saturating to avoid overflow.
+        let cutoff = now_nanos.saturating_sub(max_age_nanos);
+        deleted += conn.execute("DELETE FROM logs WHERE ts_nanos < ?1", [cutoff])? as u64;
+
+        // 2) Count-based: keep only the newest `max_records` by id.
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM logs", [], |row| row.get(0))?;
+        if count as u64 > max_records {
+            deleted += conn.execute(
+                "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?1)",
+                [max_records as i64],
+            )? as u64;
+        }
+        Ok(deleted)
+    }
 }
 
 /// Reconstruct the public record JSON (incl. "id") from a DB row.
@@ -365,5 +384,30 @@ mod tests {
         ])).unwrap();
         let r = store.query(&LogQuery { limit: 0, ..Default::default() }).unwrap();
         assert_eq!(r.records.len(), 1);
+    }
+
+    #[test]
+    fn prune_by_age() {
+        let store = LogStore::open(":memory:").unwrap();
+        store.insert_batch(&batch(vec![
+            rec("old", Severity::Info, "svc", 1_000),         // ts_nanos = 1_000e9
+            rec("new", Severity::Info, "svc", 2_000),         // ts_nanos = 2_000e9
+        ])).unwrap();
+        // now = 2_000s, max_age = 500s -> cutoff 1_500s. "old" (1000s) is pruned.
+        let deleted = store.prune(500 * 1_000_000_000, 1_000_000, 2_000 * 1_000_000_000).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn prune_by_count() {
+        let store = LogStore::open(":memory:").unwrap();
+        for i in 0..10 {
+            store.insert_batch(&batch(vec![rec("x", Severity::Info, "svc", 1_700_000_000 + i)])).unwrap();
+        }
+        // Keep only the newest 4. Huge max_age so age-pruning is a no-op.
+        let deleted = store.prune(i64::MAX, 4, 2_000_000_000 * 1_000_000_000).unwrap();
+        assert_eq!(deleted, 6);
+        assert_eq!(store.count().unwrap(), 4);
     }
 }
