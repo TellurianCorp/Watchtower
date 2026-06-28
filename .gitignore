@@ -1,4 +1,6 @@
 /target
+/target-*
+.superpowers/
 *.swp
 *.swo
 .env
