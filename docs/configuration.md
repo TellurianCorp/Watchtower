@@ -264,7 +264,7 @@ OpenSearch is unavailable.
 | `listen_addr` | string | `127.0.0.1:9092` | TCP address to bind the viewer. Defaults to localhost — expose deliberately if network access is needed |
 | `db_path` | string | `:memory:` | SQLite database path. `:memory:` is ephemeral (lost on restart); a file path (e.g. `/var/lib/watchtower/logs.db`) persists across restarts with WAL mode enabled |
 | `retention.max_records` | integer | `1000000` | Maximum rows to keep. When exceeded, the oldest rows are trimmed |
-| `retention.max_age` | duration | `7d` | Rows older than this are deleted. Accepts `h`/`d` suffixes (e.g. `"48h"`, `"30d"`) |
+| `retention.max_age` | duration | `7d` | Rows older than this are deleted. Accepts `ms`/`s`/`m`/`h`/`d` suffixes or a bare integer (seconds) — e.g. `"48h"`, `"30d"`, `"90m"` |
 | `auth.username` | string | _(none)_ | HTTP Basic auth username. Auth is disabled when `auth` is omitted |
 | `auth.password` | string | _(none)_ | HTTP Basic auth password |
 
