@@ -271,4 +271,10 @@ mod tests {
         let q = parse_query("q=charge%20failed", 0);
         assert_eq!(q.q.as_deref(), Some("charge failed"));
     }
+
+    #[test]
+    fn index_html_is_embedded() {
+        assert!(INDEX_HTML.contains("Watchtower"));
+        assert!(INDEX_HTML.contains("/api/logs"));
+    }
 }

@@ -1,1 +1,137 @@
-<!doctype html><title>watchtower</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watchtower Logs</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --txt:#d6dae2; --muted:#7d8694; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--bg); color:var(--txt); }
+  header { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:14px; margin:0 8px 0 0; }
+  input,select,button { background:var(--panel); color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; }
+  button { cursor:pointer; }
+  button.active { border-color:#3b82f6; color:#9ec1ff; }
+  #wrap { display:flex; height:calc(100vh - 49px); }
+  #list { flex:1; overflow:auto; }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:3px 8px; border-bottom:1px solid var(--line); vertical-align:top; white-space:nowrap; }
+  td.body { white-space:normal; }
+  tr { cursor:pointer; }
+  tr:hover { background:#1d212a; }
+  tr.sel { background:#243049; }
+  .sev { font-weight:bold; }
+  .s-1,.s-5 { color:var(--muted); }       /* TRACE/DEBUG */
+  .s-9 { color:#8bd5ff; }                  /* INFO */
+  .s-13 { color:#f5c451; }                 /* WARN */
+  .s-17,.s-21 { color:#ff6b6b; }           /* ERROR/FATAL */
+  .muted { color:var(--muted); }
+  #detail { width:0; transition:width .12s; overflow:auto; border-left:1px solid var(--line); background:var(--panel); }
+  #detail.open { width:42%; padding:12px; }
+  #detail pre { white-space:pre-wrap; word-break:break-word; }
+  #status { padding:4px 12px; color:var(--muted); border-top:1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Watchtower Logs</h1>
+  <input id="q" placeholder="search body…" size="20">
+  <select id="sev">
+    <option value="">All severities</option>
+    <option value="DEBUG">DEBUG+</option><option value="INFO">INFO+</option>
+    <option value="WARN">WARN+</option><option value="ERROR">ERROR+</option>
+  </select>
+  <select id="svc"><option value="">All services</option></select>
+  <select id="since">
+    <option value="">All time</option><option value="15m">Last 15m</option>
+    <option value="1h" selected>Last 1h</option><option value="24h">Last 24h</option><option value="7d">Last 7d</option>
+  </select>
+  <button id="apply">Apply</button>
+  <button id="follow" class="active">● Live</button>
+</header>
+<div id="wrap">
+  <div id="list"><table><tbody id="rows"></tbody></table></div>
+  <div id="detail"></div>
+</div>
+<div id="status">loading…</div>
+<script>
+const $ = s => document.querySelector(s);
+const rowsEl = $('#rows'), detailEl = $('#detail'), statusEl = $('#status');
+let following = true, newestId = 0, byId = {}, timer = null;
+
+const SEV = {1:'TRACE',5:'DEBUG',9:'INFO',13:'WARN',17:'ERROR',21:'FATAL'};
+
+function filters() {
+  const p = new URLSearchParams();
+  if ($('#q').value) p.set('q', $('#q').value);
+  if ($('#sev').value) p.set('min_severity', $('#sev').value);
+  if ($('#svc').value) p.set('service', $('#svc').value);
+  if ($('#since').value) p.set('since', $('#since').value);
+  return p;
+}
+
+function rowHtml(r) {
+  const t = (r['@timestamp'] || '').replace('T',' ').replace('Z','').slice(0,23);
+  const sev = SEV[r.severity] || r.severity;
+  const svc = (r.resource && r.resource.service_name) || '';
+  return `<tr data-id="${r.id}"><td class="muted">${t}</td>`
+       + `<td class="sev s-${r.severity}">${sev}</td>`
+       + `<td class="muted">${svc}</td><td class="body">${escape(r.body||'')}</td></tr>`;
+}
+function escape(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function attach(tr) {
+  tr.onclick = () => {
+    document.querySelectorAll('tr.sel').forEach(e => e.classList.remove('sel'));
+    tr.classList.add('sel');
+    const r = byId[tr.dataset.id];
+    detailEl.classList.add('open');
+    detailEl.innerHTML = '<pre>' + escape(JSON.stringify(r, null, 2)) + '</pre>';
+  };
+}
+
+async function reload() {
+  const p = filters(); p.set('limit','200');
+  const res = await fetch('/api/logs?' + p.toString());
+  const data = await res.json();
+  byId = {}; rowsEl.innerHTML = '';
+  data.records.forEach(r => { byId[r.id] = r; rowsEl.insertAdjacentHTML('beforeend', rowHtml(r)); });
+  rowsEl.querySelectorAll('tr').forEach(attach);
+  newestId = data.newest_id || 0;
+  statusEl.textContent = data.records.length + ' records';
+}
+
+async function tail() {
+  if (!following) return;
+  const p = filters(); p.set('after_id', newestId); p.set('limit','500');
+  const res = await fetch('/api/logs?' + p.toString());
+  const data = await res.json();
+  data.records.forEach(r => {
+    byId[r.id] = r;
+    rowsEl.insertAdjacentHTML('afterbegin', rowHtml(r));
+    attach(rowsEl.firstElementChild);
+  });
+  if (data.newest_id) newestId = data.newest_id;
+}
+
+async function loadServices() {
+  const res = await fetch('/api/services');
+  const data = await res.json();
+  data.services.forEach(s => {
+    const o = document.createElement('option'); o.value = s; o.textContent = s; $('#svc').appendChild(o);
+  });
+}
+
+$('#apply').onclick = reload;
+$('#follow').onclick = () => {
+  following = !following;
+  $('#follow').classList.toggle('active', following);
+  $('#follow').textContent = following ? '● Live' : '❚❚ Paused';
+};
+
+loadServices();
+reload().then(() => { timer = setInterval(tail, 1500); });
+</script>
+</body>
+</html>
