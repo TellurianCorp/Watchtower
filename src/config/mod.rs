@@ -436,7 +436,7 @@ impl Config {
         }
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         if self.sinks.is_empty() && !self.viewer.enabled {
             return Err("no sinks configured and viewer disabled: logs would be discarded".into());
         }
