@@ -292,3 +292,42 @@ async fn test_metrics_prometheus_render() {
     assert!(output.contains("watchtower_batches_received_total 3"));
     assert!(output.contains("watchtower_records_dropped_total 0"));
 }
+
+#[tokio::test]
+async fn test_viewer_stores_and_serves_logs() {
+    use std::sync::Arc;
+    use watchtower::sink::store::{LogStore, StoreSink};
+    use watchtower::viewer::ViewerServer;
+
+    // Shared in-memory store, used by both the sink and the viewer.
+    let store = Arc::new(LogStore::open(":memory:").unwrap());
+    let store_sink = StoreSink::new(Arc::clone(&store));
+    let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(store_sink)];
+
+    let (grpc_addr, _pipeline, _metrics) = start_test_server(sinks).await;
+
+    // Start the viewer on an ephemeral port.
+    let viewer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let viewer_addr = viewer_listener.local_addr().unwrap();
+    drop(viewer_listener); // free the port for the server to bind
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let viewer = ViewerServer::new(Arc::clone(&store), None);
+    tokio::spawn(async move { viewer.serve(viewer_addr, rx).await; });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Ingest over gRPC.
+    let mut client = WatchtowerServiceClient::connect(format!("http://{grpc_addr}")).await.unwrap();
+    client.ingest(make_batch(5)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await; // pipeline flush + store insert
+
+    // Query via the viewer HTTP API.
+    let body = reqwest::get(format!("http://{viewer_addr}/api/logs"))
+        .await.unwrap().text().await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["records"].as_array().unwrap().len(), 5);
+
+    // The UI page is served at /.
+    let page = reqwest::get(format!("http://{viewer_addr}/")).await.unwrap();
+    assert_eq!(page.status(), 200);
+    assert!(page.text().await.unwrap().contains("Watchtower Logs"));
+}

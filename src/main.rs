@@ -6,7 +6,7 @@ use tokio::signal;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::{error, info, warn};
 
-use watchtower::config::{Config, SinkConfig};
+use watchtower::config::{Config, SinkConfig, ViewerConfig};
 use watchtower::health::HealthServer;
 use watchtower::metrics::Metrics;
 use watchtower::pipeline::Pipeline;
@@ -14,8 +14,10 @@ use watchtower::proto::watchtower_service_server::WatchtowerServiceServer;
 use watchtower::server::WatchtowerServer;
 use watchtower::sink::elastic::ElasticSink;
 use watchtower::sink::forward::ForwardSink;
+use watchtower::sink::store::{LogStore, StoreSink};
 use watchtower::sink::Sink;
 use watchtower::spillover::SpilloverBuffer;
+use watchtower::viewer::ViewerServer;
 
 #[derive(Parser)]
 #[command(name = "watchtower", about = "High-performance gRPC log collection sidecar")]
@@ -94,7 +96,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // --- Build sinks ---
-    let sinks = build_sinks(&cfg.sinks)?;
+    let mut sinks = build_sinks(&cfg.sinks)?;
+
+    // --- Built-in viewer (SQLite store + web UI) ---
+    let viewer_store = if cfg.viewer.enabled {
+        match LogStore::open(&cfg.viewer.db_path) {
+            Ok(store) => {
+                let store = Arc::new(store);
+                sinks.push(Arc::new(StoreSink::new(Arc::clone(&store))));
+                info!(db_path = cfg.viewer.db_path.as_str(), "viewer store enabled");
+                Some(store)
+            }
+            Err(e) => {
+                error!(error = %e, "failed to open viewer store, viewer disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // --- Build pipeline ---
     let pipeline = Arc::new(Pipeline::new(
@@ -118,6 +138,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await?;
         }
+    }
+
+    // --- Spawn viewer HTTP server + retention task ---
+    if let Some(store) = &viewer_store {
+        spawn_viewer(&cfg.viewer, Arc::clone(store), shutdown_rx.clone())?;
     }
 
     // --- Build gRPC server ---
@@ -187,6 +212,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("watchtower stopped");
+    Ok(())
+}
+
+fn spawn_viewer(
+    cfg: &ViewerConfig,
+    store: Arc<LogStore>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let addr: SocketAddr = cfg.listen_addr.parse()?;
+    let auth = cfg.auth.clone();
+    let server = ViewerServer::new(Arc::clone(&store), auth);
+    tokio::spawn(async move { server.serve(addr, shutdown_rx).await; });
+    info!(%addr, "viewer server started");
+
+    // Retention task: prune by age + count on an interval.
+    let max_age_nanos = cfg.retention.max_age.as_nanos() as i64;
+    let max_records = cfg.retention.max_records;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            let store = Arc::clone(&store);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+            let _ = tokio::task::spawn_blocking(move || store.prune(max_age_nanos, max_records, now)).await;
+        }
+    });
     Ok(())
 }
 
