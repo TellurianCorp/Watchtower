@@ -1,3 +1,4 @@
+pub mod encode;
 pub mod elastic;
 pub mod forward;
 
