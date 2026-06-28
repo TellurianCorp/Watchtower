@@ -60,6 +60,8 @@ network overhead.
   single codegen unit), no GC, predictable latency
 - **Railway / container-ready** — configure entirely via environment variables,
   auto-detects `PORT`, no config file needed
+- **Built-in log viewer** — embedded SQLite store + browser UI + JSON search API
+  on port 9092; run Watchtower with no Elasticsearch or OpenSearch at all
 
 ## Quick Start
 
@@ -81,7 +83,7 @@ Copy the example configuration and edit it:
 cp watchtower.example.yaml watchtower.yaml
 ```
 
-At minimum, configure at least one sink:
+At minimum, configure at least one sink **or** enable the built-in viewer:
 
 ```yaml
 server:
@@ -113,6 +115,26 @@ Or with a custom log level:
 
 ```bash
 RUST_LOG=debug ./target/release/watchtower --config watchtower.yaml
+```
+
+### Run without Elasticsearch
+
+Watchtower can run standalone with no external sinks by enabling the built-in
+viewer. Logs are stored in an embedded SQLite database and browsable at
+`http://127.0.0.1:9092`.
+
+```yaml
+# watchtower.yaml (no sinks required)
+server:
+  listen_addr: "[::]:9090"
+viewer:
+  enabled: true
+  db_path: "/var/lib/watchtower/logs.db"
+```
+
+```bash
+./target/release/watchtower --config watchtower.yaml
+# gRPC ingestion on :9090, viewer UI on http://127.0.0.1:9092
 ```
 
 ### 4. Send logs from your application
@@ -177,6 +199,9 @@ See [docs/railway.md](docs/railway.md) for the full Railway deployment guide.
 | `GET /healthz` | 9091 | Liveness probe — always returns `200 OK` |
 | `GET /readyz` | 9091 | Readiness probe — `200` when accepting traffic, `503` during startup/shutdown |
 | `GET /metrics` | 9091 | Prometheus metrics in text exposition format |
+| `GET /` | 9092 | Built-in log viewer web UI (requires `viewer.enabled: true`) |
+| `GET /api/logs` | 9092 | JSON log search API — query params: `q`, `min_severity`, `service`, `since`, `after_id`, `before_id`, `limit` |
+| `GET /api/services` | 9092 | JSON list of distinct service names seen in the SQLite store |
 
 ## Project Structure
 
@@ -193,7 +218,11 @@ See [docs/railway.md](docs/railway.md) for the full Railway deployment guide.
 │   ├── sink/
 │   │   ├── mod.rs              # Sink trait definition
 │   │   ├── elastic.rs          # Elasticsearch/OpenSearch HTTP bulk sink
-│   │   └── forward.rs          # Upstream Watchtower gRPC forwarding
+│   │   ├── forward.rs          # Upstream Watchtower gRPC forwarding
+│   │   └── store.rs            # SQLite log store (LogStore, StoreSink, LogQuery)
+│   ├── viewer/
+│   │   ├── mod.rs              # Built-in HTTP viewer server + /api/logs, /api/services handlers
+│   │   └── index.html          # Embedded browser UI (live tail, search, severity filters)
 │   ├── metrics.rs              # Prometheus counters and gauges
 │   ├── health.rs               # HTTP health/readiness/metrics server
 │   ├── spillover.rs            # Disk-backed overflow buffer

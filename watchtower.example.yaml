@@ -70,3 +70,17 @@ sinks:
   #   flush_interval: "5s"
   #   retry_attempts: 3
   #   retry_backoff: "1s"
+
+# Built-in log viewer. When enabled, Watchtower stores incoming logs in an
+# embedded SQLite database and serves a web UI + JSON API to search them —
+# so you can run with NO Elasticsearch/OpenSearch/forward sink at all.
+viewer:
+  enabled: false
+  listen_addr: "127.0.0.1:9092"   # bind localhost by default; expose deliberately
+  db_path: ":memory:"             # ephemeral; set a file path (e.g. /var/lib/watchtower/logs.db) to persist
+  retention:
+    max_records: 1000000          # trim oldest rows beyond this
+    max_age: "7d"                 # delete rows older than this
+  # auth:                         # optional HTTP basic auth on the viewer
+  #   username: "admin"
+  #   password: "changeme"
