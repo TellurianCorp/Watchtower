@@ -223,6 +223,7 @@ fn spawn_viewer(
     let addr: SocketAddr = cfg.listen_addr.parse()?;
     let auth = cfg.auth.clone();
     let server = ViewerServer::new(Arc::clone(&store), auth);
+    let mut retention_shutdown = shutdown_rx.clone();
     tokio::spawn(async move { server.serve(addr, shutdown_rx).await; });
     info!(%addr, "viewer server started");
 
@@ -232,13 +233,17 @@ fn spawn_viewer(
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
-            tick.tick().await;
-            let store = Arc::clone(&store);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as i64)
-                .unwrap_or(0);
-            let _ = tokio::task::spawn_blocking(move || store.prune(max_age_nanos, max_records, now)).await;
+            tokio::select! {
+                _ = retention_shutdown.changed() => break,
+                _ = tick.tick() => {
+                    let store = Arc::clone(&store);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as i64)
+                        .unwrap_or(0);
+                    let _ = tokio::task::spawn_blocking(move || store.prune(max_age_nanos, max_records, now)).await;
+                }
+            }
         }
     });
     Ok(())
