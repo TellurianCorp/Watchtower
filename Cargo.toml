@@ -54,6 +54,9 @@ http-body-util = "0.1"
 # Disk spillover
 crc32fast = "1"
 
+# Embedded SQLite store for the built-in viewer
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [build-dependencies]
 tonic-build = "0.13"
 
