@@ -75,9 +75,9 @@ function rowHtml(r) {
   const t = (r['@timestamp'] || '').replace('T',' ').replace('Z','').slice(0,23);
   const sev = SEV[r.severity] || r.severity;
   const svc = (r.resource && r.resource.service_name) || '';
-  return `<tr data-id="${r.id}"><td class="muted">${t}</td>`
+  return `<tr data-id="${r.id}"><td class="muted">${escape(t)}</td>`
        + `<td class="sev s-${r.severity}">${sev}</td>`
-       + `<td class="muted">${svc}</td><td class="body">${escape(r.body||'')}</td></tr>`;
+       + `<td class="muted">${escape(svc)}</td><td class="body">${escape(r.body||'')}</td></tr>`;
 }
 function escape(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
