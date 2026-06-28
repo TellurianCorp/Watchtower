@@ -6,6 +6,7 @@ pub mod pipeline;
 pub mod server;
 pub mod sink;
 pub mod spillover;
+pub mod viewer;
 
 /// Generated protobuf/gRPC types.
 pub mod proto {
