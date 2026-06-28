@@ -14,6 +14,7 @@ pub struct Config {
     pub spillover: SpilloverConfig,
     #[serde(default)]
     pub sinks: Vec<SinkConfig>,
+    pub viewer: ViewerConfig,
 }
 
 /// gRPC listener settings.
@@ -53,6 +54,52 @@ pub struct PipelineConfig {
 pub struct HealthConfig {
     pub enabled: bool,
     pub listen_addr: String,
+}
+
+/// Built-in log viewer (SQLite store + web UI) settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ViewerConfig {
+    pub enabled: bool,
+    pub listen_addr: String,
+    pub db_path: String,
+    pub retention: RetentionConfig,
+    pub auth: Option<BasicAuthConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    pub max_records: u64,
+    #[serde(with = "humantime_serde")]
+    pub max_age: Duration,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BasicAuthConfig {
+    pub username: String,
+    pub password: String,
+}
+
+impl Default for ViewerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: "127.0.0.1:9092".into(),
+            db_path: ":memory:".into(),
+            retention: RetentionConfig::default(),
+            auth: None,
+        }
+    }
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_records: 1_000_000,
+            max_age: Duration::from_secs(7 * 86400),
+        }
+    }
 }
 
 /// Disk spillover settings for crash resilience.
@@ -121,6 +168,7 @@ impl Default for Config {
             health: HealthConfig::default(),
             spillover: SpilloverConfig::default(),
             sinks: Vec::new(),
+            viewer: ViewerConfig::default(),
         }
     }
 }
@@ -192,10 +240,28 @@ fn default_true() -> bool {
     true
 }
 
-/// Deserialize human-readable durations like "5s", "100ms", "2m".
+/// Parse human-readable durations like "5s", "100ms", "2m", "3h", "7d".
+/// "30" (bare number) is interpreted as seconds.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    // Check "ms" before "m"/"s".
+    if let Some(rest) = s.strip_suffix("ms") {
+        rest.trim().parse::<u64>().map(Duration::from_millis).map_err(|e| e.to_string())
+    } else if let Some(rest) = s.strip_suffix('s') {
+        rest.trim().parse::<u64>().map(Duration::from_secs).map_err(|e| e.to_string())
+    } else if let Some(rest) = s.strip_suffix('m') {
+        rest.trim().parse::<u64>().map(|v| Duration::from_secs(v * 60)).map_err(|e| e.to_string())
+    } else if let Some(rest) = s.strip_suffix('h') {
+        rest.trim().parse::<u64>().map(|v| Duration::from_secs(v * 3600)).map_err(|e| e.to_string())
+    } else if let Some(rest) = s.strip_suffix('d') {
+        rest.trim().parse::<u64>().map(|v| Duration::from_secs(v * 86400)).map_err(|e| e.to_string())
+    } else {
+        s.parse::<u64>().map(Duration::from_secs).map_err(|_| format!("invalid duration: {s}"))
+    }
+}
+
 mod humantime_serde {
     use std::time::Duration;
-
     use serde::{self, Deserialize, Deserializer};
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -203,32 +269,7 @@ mod humantime_serde {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        parse_duration(&s).map_err(serde::de::Error::custom)
-    }
-
-    fn parse_duration(s: &str) -> Result<Duration, String> {
-        let s = s.trim();
-        if let Some(rest) = s.strip_suffix("ms") {
-            rest.trim()
-                .parse::<u64>()
-                .map(Duration::from_millis)
-                .map_err(|e| e.to_string())
-        } else if let Some(rest) = s.strip_suffix('s') {
-            rest.trim()
-                .parse::<u64>()
-                .map(Duration::from_secs)
-                .map_err(|e| e.to_string())
-        } else if let Some(rest) = s.strip_suffix('m') {
-            rest.trim()
-                .parse::<u64>()
-                .map(|v| Duration::from_secs(v * 60))
-                .map_err(|e| e.to_string())
-        } else {
-            // Fallback: try as seconds
-            s.parse::<u64>()
-                .map(Duration::from_secs)
-                .map_err(|_| format!("invalid duration: {s}"))
-        }
+        super::parse_duration(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -396,6 +437,9 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.sinks.is_empty() && !self.viewer.enabled {
+            return Err("no sinks configured and viewer disabled: logs would be discarded".into());
+        }
         if self.pipeline.batch_size == 0 {
             return Err("pipeline.batch_size must be > 0".into());
         }
@@ -434,5 +478,43 @@ fn parse_duration_str(s: &str) -> Result<Duration, Box<dyn std::error::Error>> {
         Ok(Duration::from_secs(rest.trim().parse::<u64>()? * 60))
     } else {
         Ok(Duration::from_secs(s.parse()?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hours_and_days() {
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+        assert_eq!(parse_duration("3d").unwrap(), Duration::from_secs(259200));
+        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("45s").unwrap(), Duration::from_secs(45));
+        assert_eq!(parse_duration("10m").unwrap(), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn viewer_defaults_are_safe() {
+        let cfg = Config::default();
+        assert!(!cfg.viewer.enabled);
+        assert_eq!(cfg.viewer.listen_addr, "127.0.0.1:9092");
+        assert_eq!(cfg.viewer.db_path, ":memory:");
+        assert_eq!(cfg.viewer.retention.max_records, 1_000_000);
+        assert_eq!(cfg.viewer.retention.max_age, Duration::from_secs(7 * 86400));
+        assert!(cfg.viewer.auth.is_none());
+    }
+
+    #[test]
+    fn rejects_no_sinks_when_viewer_disabled() {
+        let cfg = Config::default(); // no sinks, viewer disabled
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_no_sinks_when_viewer_enabled() {
+        let mut cfg = Config::default();
+        cfg.viewer.enabled = true;
+        assert!(cfg.validate().is_ok());
     }
 }

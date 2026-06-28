@@ -1,5 +1,7 @@
+pub mod encode;
 pub mod elastic;
 pub mod forward;
+pub mod store;
 
 use async_trait::async_trait;
 

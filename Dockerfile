@@ -1,7 +1,7 @@
 # Build stage
 FROM rust:1.94-slim AS builder
 
-RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y protobuf-compiler gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . .
@@ -18,7 +18,7 @@ COPY --from=builder /build/target/release/watchtower /usr/local/bin/watchtower
 
 RUN mkdir -p /etc/watchtower /var/lib/watchtower
 
-EXPOSE 9090 9091
+EXPOSE 9090 9091 9092
 
 # Health check for local Docker usage.
 # Railway uses its own health check (configured in railway.toml).

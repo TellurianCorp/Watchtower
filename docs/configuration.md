@@ -244,6 +244,90 @@ Forwards batches to a larger upstream Watchtower instance via the same gRPC
 
 ---
 
+## `viewer`
+
+The built-in log viewer stores incoming logs in an embedded SQLite database and
+serves a browser UI plus a JSON API for searching them. When the viewer is
+enabled, Watchtower can run with **no external sinks at all** — useful for
+development, small deployments, and environments where Elasticsearch or
+OpenSearch is unavailable.
+
+> **Validation rule:** at least one sink **or** `viewer.enabled: true` must be
+> set. Watchtower refuses to start if both are absent, because logs would be
+> silently discarded.
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Start the viewer HTTP server and SQLite store |
+| `listen_addr` | string | `127.0.0.1:9092` | TCP address to bind the viewer. Defaults to localhost — expose deliberately if network access is needed |
+| `db_path` | string | `:memory:` | SQLite database path. `:memory:` is ephemeral (lost on restart); a file path (e.g. `/var/lib/watchtower/logs.db`) persists across restarts with WAL mode enabled |
+| `retention.max_records` | integer | `1000000` | Maximum rows to keep. When exceeded, the oldest rows are trimmed |
+| `retention.max_age` | duration | `7d` | Rows older than this are deleted. Accepts `ms`/`s`/`m`/`h`/`d` suffixes or a bare integer (seconds) — e.g. `"48h"`, `"30d"`, `"90m"` |
+| `auth.username` | string | _(none)_ | HTTP Basic auth username. Auth is disabled when `auth` is omitted |
+| `auth.password` | string | _(none)_ | HTTP Basic auth password |
+
+### Endpoints
+
+All viewer endpoints are served on `listen_addr` (default port 9092).
+
+| Path | Method | Description |
+|------|--------|-------------|
+| `/` | GET | Browser web UI — live-tail view with severity filters, service filter, and full-text search |
+| `/api/logs` | GET | JSON log query API. Returns `{ records, oldest_id, newest_id }` |
+| `/api/services` | GET | JSON list of distinct service names seen in the store. Returns `{ services: [...] }` |
+
+#### `/api/logs` query parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `q` | string | Full-text substring match on the log body |
+| `min_severity` | string or int | Minimum severity. Accepts names (`TRACE`, `DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `FATAL`) or the raw integer severity value |
+| `service` | string | Exact match on `resource.service_name` |
+| `since` | duration | Return only logs from the last N duration (e.g. `"1h"`, `"30m"`, `"2d"`). Anchored to the request time |
+| `after_id` | integer | Return only records with `id > after_id`, ascending order (live-tail polling) |
+| `before_id` | integer | Return only records with `id < before_id`, descending order (paginate backwards) |
+| `limit` | integer | Maximum records to return. Default `100`, maximum `1000` |
+
+When `after_id` is set, results are ordered ascending by `id` (oldest of the new batch first). Otherwise results are ordered descending (newest first). Combine `oldest_id` / `newest_id` from the response with `before_id` / `after_id` for efficient pagination and live tailing.
+
+#### Severity integer values
+
+| Name | Integer |
+|------|---------|
+| TRACE | 1 |
+| DEBUG | 5 |
+| INFO | 9 |
+| WARN | 13 |
+| ERROR | 17 |
+| FATAL | 21 |
+
+### `:memory:` vs file path
+
+| Mode | `db_path` value | Durability | WAL enabled |
+|------|-----------------|------------|-------------|
+| Ephemeral | `:memory:` | Lost on restart | No |
+| Durable | `/path/to/logs.db` | Persists across restarts | Yes (WAL + NORMAL sync) |
+
+Use `:memory:` for development or short-lived containers. Use a file path for
+any environment where log history must survive a restart.
+
+### Run with no Elasticsearch (minimal config)
+
+```yaml
+server:
+  listen_addr: "[::]:9090"
+viewer:
+  enabled: true
+  db_path: "/var/lib/watchtower/logs.db"
+```
+
+No `sinks` key is needed. All ingested logs are stored in SQLite and browsable
+at `http://127.0.0.1:9092`.
+
+---
+
 ## Environment Variables
 
 | Variable | Description |
