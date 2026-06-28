@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Spawn viewer HTTP server + retention task ---
     if let Some(store) = &viewer_store {
-        spawn_viewer(&cfg.viewer, Arc::clone(store), shutdown_rx.clone())?;
+        spawn_viewer(&cfg.viewer, Arc::clone(store), shutdown_rx.clone()).await?;
     }
 
     // --- Build gRPC server ---
@@ -215,17 +215,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn spawn_viewer(
+async fn spawn_viewer(
     cfg: &ViewerConfig,
     store: Arc<LogStore>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = cfg.listen_addr.parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(%addr, "viewer server started");
     let auth = cfg.auth.clone();
     let server = ViewerServer::new(Arc::clone(&store), auth);
     let mut retention_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move { server.serve(addr, shutdown_rx).await; });
-    info!(%addr, "viewer server started");
+    tokio::spawn(async move { server.serve(listener, shutdown_rx).await; });
 
     // Retention task: prune by age + count on an interval.
     let max_age_nanos = cfg.retention.max_age.as_nanos() as i64;

@@ -309,11 +309,10 @@ async fn test_viewer_stores_and_serves_logs() {
     // Start the viewer on an ephemeral port.
     let viewer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let viewer_addr = viewer_listener.local_addr().unwrap();
-    drop(viewer_listener); // free the port for the server to bind
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let viewer = ViewerServer::new(Arc::clone(&store), None);
-    tokio::spawn(async move { viewer.serve(viewer_addr, rx).await; });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::spawn(async move { viewer.serve(viewer_listener, rx).await; });
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Ingest over gRPC.
     let mut client = WatchtowerServiceClient::connect(format!("http://{grpc_addr}")).await.unwrap();
@@ -330,4 +329,30 @@ async fn test_viewer_stores_and_serves_logs() {
     let page = reqwest::get(format!("http://{viewer_addr}/")).await.unwrap();
     assert_eq!(page.status(), 200);
     assert!(page.text().await.unwrap().contains("Watchtower Logs"));
+}
+
+#[tokio::test]
+async fn test_viewer_basic_auth() {
+    use std::sync::Arc;
+    use watchtower::config::BasicAuthConfig;
+    use watchtower::sink::store::LogStore;
+    use watchtower::viewer::ViewerServer;
+
+    let store = Arc::new(LogStore::open(":memory:").unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let auth = Some(BasicAuthConfig { username: "admin".into(), password: "changeme".into() });
+    let viewer = ViewerServer::new(Arc::clone(&store), auth);
+    tokio::spawn(async move { viewer.serve(listener, rx).await; });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let no_creds = client.get(format!("http://{addr}/api/logs")).send().await.unwrap();
+    assert_eq!(no_creds.status(), 401);
+    let with_creds = client
+        .get(format!("http://{addr}/api/logs"))
+        .basic_auth("admin", Some("changeme"))
+        .send().await.unwrap();
+    assert_eq!(with_creds.status(), 200);
 }

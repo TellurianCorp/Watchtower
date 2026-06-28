@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use http_body_util::Full;
@@ -9,7 +8,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::config::{BasicAuthConfig, parse_duration};
 use crate::sink::store::{LogQuery, LogStore};
@@ -99,13 +98,8 @@ impl ViewerServer {
         Self { store, auth }
     }
 
-    pub async fn serve(self, addr: SocketAddr, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        let listener = match TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(e) => { error!(error = %e, "viewer bind failed"); return; }
-        };
-        info!(%addr, "viewer server listening");
-
+    pub async fn serve(self, listener: TcpListener, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+        info!(addr = ?listener.local_addr().ok(), "viewer server listening");
         let store = self.store;
         let auth = Arc::new(self.auth);
 
@@ -141,11 +135,16 @@ fn unauthorized() -> Response<Full<Bytes>> {
 }
 
 fn check_auth(req: &Request<hyper::body::Incoming>, auth: &Option<BasicAuthConfig>) -> bool {
+    let header = req.headers().get("authorization").and_then(|h| h.to_str().ok());
+    auth_matches(header, auth)
+}
+
+/// Pure auth decision: `None` config = open; otherwise the header must carry the
+/// matching `Basic <base64(user:pass)>` credential.
+fn auth_matches(header: Option<&str>, auth: &Option<BasicAuthConfig>) -> bool {
     let Some(cfg) = auth else { return true };
     let expected = base64_encode(format!("{}:{}", cfg.username, cfg.password).as_bytes());
-    req.headers()
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
+    header
         .and_then(|h| h.strip_prefix("Basic "))
         .map(|got| got == expected)
         .unwrap_or(false)
@@ -239,6 +238,26 @@ fn now_unix_nanos() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BasicAuthConfig;
+
+    #[test]
+    fn base64_known_vectors() {
+        assert_eq!(base64_encode(b"a:b"), "YTpi");
+        assert_eq!(base64_encode(b"admin:changeme"), "YWRtaW46Y2hhbmdlbWU=");
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(b"ab"), "YWI=");
+    }
+
+    #[test]
+    fn auth_matches_logic() {
+        assert!(auth_matches(None, &None));
+        assert!(auth_matches(Some("anything"), &None));
+        let cfg = Some(BasicAuthConfig { username: "admin".into(), password: "changeme".into() });
+        assert!(auth_matches(Some("Basic YWRtaW46Y2hhbmdlbWU="), &cfg));   // correct
+        assert!(!auth_matches(Some("Basic d3Jvbmc="), &cfg));               // wrong creds
+        assert!(!auth_matches(None, &cfg));                                 // missing header
+        assert!(!auth_matches(Some("YWRtaW46Y2hhbmdlbWU="), &cfg));         // missing "Basic " prefix
+    }
 
     #[test]
     fn severity_names_and_ints() {
