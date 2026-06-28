@@ -95,7 +95,7 @@ impl LogStore {
 }
 
 /// Filters for a log query. All `None`/default fields mean "no constraint".
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LogQuery {
     pub q: Option<String>,
     pub min_severity: Option<i32>,
@@ -104,6 +104,20 @@ pub struct LogQuery {
     pub after_id: Option<i64>,
     pub before_id: Option<i64>,
     pub limit: usize,
+}
+
+impl Default for LogQuery {
+    fn default() -> Self {
+        Self {
+            q: None,
+            min_severity: None,
+            service: None,
+            since_nanos: None,
+            after_id: None,
+            before_id: None,
+            limit: 100,
+        }
+    }
 }
 
 pub struct QueryResult {
@@ -340,5 +354,16 @@ mod tests {
             rec("z", Severity::Info, "pay", 3),
         ])).unwrap();
         assert_eq!(store.distinct_services().unwrap(), vec!["auth".to_string(), "pay".to_string()]);
+    }
+
+    #[test]
+    fn limit_zero_is_clamped_to_one() {
+        let store = LogStore::open(":memory:").unwrap();
+        store.insert_batch(&batch(vec![
+            rec("a", Severity::Info, "svc", 1),
+            rec("b", Severity::Info, "svc", 2),
+        ])).unwrap();
+        let r = store.query(&LogQuery { limit: 0, ..Default::default() }).unwrap();
+        assert_eq!(r.records.len(), 1);
     }
 }
